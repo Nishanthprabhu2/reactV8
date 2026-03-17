@@ -12,7 +12,7 @@ The fix removes `Vary: Cookie` and adds `Cache-Control: immutable` on versioned 
 
 | File | Purpose |
 |------|---------|
-| `Apply-TableauCacheFix.ps1` | PowerShell script that applies the fix |
+| `Apply-TableauCacheFix.ps1` | PowerShell script that applies/rollbacks the fix |
 | `Tableau_Cache_Fix_Documentation.md` | Detailed technical documentation |
 
 ---
@@ -53,6 +53,10 @@ cd "d:\Program Files\Tableau\Tableau Server\packages"
 ### Step 5: Run the Script
 
 ```powershell
+# Preview changes first (no modifications made):
+.\Apply-TableauCacheFix.ps1 -DryRun
+
+# Apply the fix:
 .\Apply-TableauCacheFix.ps1
 ```
 
@@ -62,10 +66,29 @@ cd "d:\Program Files\Tableau\Tableau Server\packages"
 === Tableau Cache Fix ===
 
 Found: D:\...\templates.20233.24.0425.1414\httpd.conf.ftl
+
+BEFORE:
+  Vary header:     Cookie,Accept-Encoding (Tableau default)
+  Cache-Control:   max-age=31536000 (Tableau default)
+  Cache fix:       Not applied
+
 Backup: D:\...\httpd.conf.ftl.bak_20260224_084025
 [Change 1/3] VizQL static assets - OK
 [Change 2/3] WGServer static assets - OK
 [Change 3/3] Embedding API - OK
+
+AFTER:
+  Vary header:     Accept-Encoding (Cookie removed)
+  Cache-Control:   public, max-age=31536000, immutable
+  Cache fix:       Applied (3/3 blocks)
+
+  +-----------------------+---------------------------------+------------------------------------------+
+  | Setting               | Previous                        | Current                                  |
+  +-----------------------+---------------------------------+------------------------------------------+
+  | Vary header           | Cookie,Accept-Encoding          | Accept-Encoding                          |
+  | Cache-Control         | max-age=31536000                | public, max-age=31536000, immutable      |
+  | CUSTOM CACHE CHANGES  | Not present                     | 3 blocks applied                         |
+  +-----------------------+---------------------------------+------------------------------------------+
 
 File updated. Now deploying...
 Running: tsm configuration set -k gateway.timeout -v 7201
@@ -75,6 +98,8 @@ Running: tsm pending-changes apply
 Successfully deployed nodes with updated configuration and topology version.
 
 === DONE ===
+
+  To rollback: .\Apply-TableauCacheFix.ps1 -Rollback
 ```
 
 > **Note:** The `tsm pending-changes apply` step takes ~15 minutes and causes a brief gateway restart.
@@ -86,7 +111,7 @@ Successfully deployed nodes with updated configuration and topology version.
 
 After the script completes, verify that the changes made it into the generated Apache config:
 
-### Step 1: Find the generated httpd.conf
+### Step 1: Search for the changes
 
 ```powershell
 cd "d:\Program Files\Tableau\Tableau Server\packages"
@@ -120,18 +145,51 @@ If you see all 6 matches and the `tsm pending-changes apply` completed successfu
 
 ## How to Rollback
 
-If anything goes wrong after applying the fix:
+### Option A: Use the Script (Recommended)
 
-### Option A: Restore from Backup
+The script has a built-in rollback mode that automatically removes all cache fix blocks and redeploys:
 
-The script creates a timestamped backup before making changes (e.g., `httpd.conf.ftl.bak_20260224_084025`).
+```powershell
+cd "d:\Program Files\Tableau\Tableau Server\packages"
+.\Apply-TableauCacheFix.ps1 -Rollback
+```
+
+Expected output:
+
+```
+=== Tableau Cache Fix — ROLLBACK ===
+
+Found: D:\...\templates.20233.24.0425.1414\httpd.conf.ftl
+
+BEFORE rollback:
+  Cache fix blocks found: 3
+  Vary header:           unset + Accept-Encoding only
+  Cache-Control:         public, max-age=31536000, immutable
+  Backup: D:\...\httpd.conf.ftl.bak_rollback_20260317_083100
+
+AFTER rollback:
+  Cache fix blocks removed: 3
+  Vary header:              Cookie,Accept-Encoding (Tableau default)
+  Cache-Control:            max-age=31536000 (Tableau default)
+
+File updated. Now deploying...
+Running: tsm configuration set -k gateway.timeout -v 7200
+Running: tsm pending-changes apply
+...
+
+=== ROLLBACK COMPLETE ===
+```
+
+### Option B: Restore from Backup
+
+The script creates a timestamped backup before every change. To restore manually:
 
 ```powershell
 # 1. Find the backup file
 cd "d:\Program Files\Tableau\Tableau Server\packages"
 dir templates.*\httpd.conf.ftl.bak*
 
-# 2. Copy it back (replace the version number and timestamp with actual values)
+# 2. Copy it back (replace version number and timestamp with actual values)
 Copy-Item "templates.20233.24.0425.1414\httpd.conf.ftl.bak_20260224_084025" `
           "templates.20233.24.0425.1414\httpd.conf.ftl" -Force
 
@@ -140,26 +198,15 @@ tsm configuration set -k gateway.timeout -v 7200
 tsm pending-changes apply
 ```
 
-### Option B: Manual Revert
+---
 
-1. Open `httpd.conf.ftl` in a text editor (as Administrator)
-2. Search for `CUSTOM CACHE CHANGES` — there will be 3 blocks
-3. Delete these 5 lines from each block:
+## Script Modes — Quick Reference
 
-```
-    # --- CUSTOM CACHE CHANGES - START (...) ---
-    Header unset Vary
-    Header append Vary Accept-Encoding
-    Header set Cache-Control "public, max-age=31536000, immutable"
-    # --- CUSTOM CACHE CHANGES - END ---
-```
-
-4. Save the file, then redeploy:
-
-```powershell
-tsm configuration set -k gateway.timeout -v 7200
-tsm pending-changes apply
-```
+| Command | What It Does |
+|---------|-------------|
+| `.\Apply-TableauCacheFix.ps1` | Apply the cache fix + deploy |
+| `.\Apply-TableauCacheFix.ps1 -DryRun` | Preview changes only, no modifications |
+| `.\Apply-TableauCacheFix.ps1 -Rollback` | Remove the fix + deploy (restore Tableau defaults) |
 
 ---
 
@@ -169,7 +216,9 @@ tsm pending-changes apply
 |---------|----------|
 | Script says "No templates.* folder found" | Make sure you're running from `d:\Program Files\Tableau\Tableau Server\packages\` |
 | Script says "Changes are ALREADY applied" | Fix is already in place, no action needed |
+| Script says "No CUSTOM CACHE CHANGES found" (on rollback) | Fix hasn't been applied, nothing to rollback |
 | Script says "Expected 3 changes, applied X" | Tableau may have restructured the template in a new version. Apply changes manually using the documentation file |
 | Execution policy error | Run `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` first |
 | Access denied | Run PowerShell as **Administrator** |
 | Gateway doesn't restart | Run `tsm restart` manually |
+| `tsm pending-changes apply` says "Canceling job to avoid restarting server" | Run `tsm pending-changes apply --ignore-prompt` instead |
